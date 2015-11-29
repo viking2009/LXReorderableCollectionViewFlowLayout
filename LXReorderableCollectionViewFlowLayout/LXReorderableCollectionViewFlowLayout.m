@@ -9,8 +9,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-#define LX_FRAMES_PER_SECOND 60.0
-
 #ifndef CGGEOMETRY_LXSUPPORT_H_
 CG_INLINE CGPoint
 LXS_CGPointAdd(CGPoint point1, CGPoint point2) {
@@ -45,18 +43,22 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
 
 @interface UICollectionViewCell (LXReorderableCollectionViewFlowLayout)
 
-- (UIImage *)LX_rasterizedImage;
+- (UIView *)LX_snapshotView;
 
 @end
 
 @implementation UICollectionViewCell (LXReorderableCollectionViewFlowLayout)
 
-- (UIImage *)LX_rasterizedImage {
-    UIGraphicsBeginImageContextWithOptions(self.bounds.size, self.isOpaque, 0.0f);
-    [self.layer renderInContext:UIGraphicsGetCurrentContext()];
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return image;
+- (UIView *)LX_snapshotView {
+    if ([self respondsToSelector:@selector(snapshotViewAfterScreenUpdates:)]) {
+        return [self snapshotViewAfterScreenUpdates:YES];
+    } else {
+        UIGraphicsBeginImageContextWithOptions(self.bounds.size, self.isOpaque, 0.0f);
+        [self.layer renderInContext:UIGraphicsGetCurrentContext()];
+        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        return [[UIImageView alloc] initWithImage:image];
+    }
 }
 
 @end
@@ -105,6 +107,30 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleApplicationWillResignActive:) name: UIApplicationWillResignActiveNotification object:nil];
 }
 
+- (void)tearDownCollectionView {
+    // Tear down long press gesture
+    if (_longPressGestureRecognizer) {
+        UIView *view = _longPressGestureRecognizer.view;
+        if (view) {
+            [view removeGestureRecognizer:_longPressGestureRecognizer];
+        }
+        _longPressGestureRecognizer.delegate = nil;
+        _longPressGestureRecognizer = nil;
+    }
+    
+    // Tear down pan gesture
+    if (_panGestureRecognizer) {
+        UIView *view = _panGestureRecognizer.view;
+        if (view) {
+            [view removeGestureRecognizer:_panGestureRecognizer];
+        }
+        _panGestureRecognizer.delegate = nil;
+        _panGestureRecognizer = nil;
+    }
+    
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillResignActiveNotification object:nil];
+}
+
 - (id)init {
     self = [super init];
     if (self) {
@@ -125,8 +151,8 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
 
 - (void)dealloc {
     [self invalidatesScrollTimer];
+    [self tearDownCollectionView];
     [self removeObserver:self forKeyPath:kLXCollectionViewKeyPath];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillResignActiveNotification object:nil];
 }
 
 - (void)applyLayoutAttributes:(UICollectionViewLayoutAttributes *)layoutAttributes {
@@ -213,22 +239,25 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
     CGSize frameSize = self.collectionView.bounds.size;
     CGSize contentSize = self.collectionView.contentSize;
     CGPoint contentOffset = self.collectionView.contentOffset;
-    CGFloat distance = self.scrollingSpeed / LX_FRAMES_PER_SECOND;
+    UIEdgeInsets contentInset = self.collectionView.contentInset;
+    // Important to have an integer `distance` as the `contentOffset` property automatically gets rounded
+    // and it would diverge from the view's center resulting in a "cell is slipping away under finger"-bug.
+    CGFloat distance = rint(self.scrollingSpeed * displayLink.duration);
     CGPoint translation = CGPointZero;
     
     switch(direction) {
         case LXScrollingDirectionUp: {
             distance = -distance;
-            CGFloat minY = 0.0f;
+            CGFloat minY = 0.0f - contentInset.top;
             
             if ((contentOffset.y + distance) <= minY) {
-                distance = -contentOffset.y;
+                distance = -contentOffset.y - contentInset.top;
             }
             
             translation = CGPointMake(0.0f, distance);
         } break;
         case LXScrollingDirectionDown: {
-            CGFloat maxY = MAX(contentSize.height, frameSize.height) - frameSize.height;
+            CGFloat maxY = MAX(contentSize.height, frameSize.height) - frameSize.height + contentInset.bottom;
             
             if ((contentOffset.y + distance) >= maxY) {
                 distance = maxY - contentOffset.y;
@@ -238,16 +267,16 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
         } break;
         case LXScrollingDirectionLeft: {
             distance = -distance;
-            CGFloat minX = 0.0f;
+            CGFloat minX = 0.0f - contentInset.left;
             
             if ((contentOffset.x + distance) <= minX) {
-                distance = -contentOffset.x;
+                distance = -contentOffset.x - contentInset.left;
             }
             
             translation = CGPointMake(distance, 0.0f);
         } break;
         case LXScrollingDirectionRight: {
-            CGFloat maxX = MAX(contentSize.width, frameSize.width) - frameSize.width;
+            CGFloat maxX = MAX(contentSize.width, frameSize.width) - frameSize.width + contentInset.right;
             
             if ((contentOffset.x + distance) >= maxX) {
                 distance = maxX - contentOffset.x;
@@ -287,12 +316,12 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
             self.currentView = [[UIView alloc] initWithFrame:collectionViewCell.frame];
             
             collectionViewCell.highlighted = YES;
-            UIImageView *highlightedImageView = [[UIImageView alloc] initWithImage:[collectionViewCell LX_rasterizedImage]];
+            UIView *highlightedImageView = [collectionViewCell LX_snapshotView];
             highlightedImageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             highlightedImageView.alpha = 1.0f;
             
             collectionViewCell.highlighted = NO;
-            UIImageView *imageView = [[UIImageView alloc] initWithImage:[collectionViewCell LX_rasterizedImage]];
+            UIView *imageView = [collectionViewCell LX_snapshotView];
             imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             imageView.alpha = 0.0f;
             
@@ -342,6 +371,8 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
                 
                 UICollectionViewLayoutAttributes *layoutAttributes = [self layoutAttributesForItemAtIndexPath:currentIndexPath];
                 
+                self.longPressGestureRecognizer.enabled = NO;
+                
                 __weak typeof(self) weakSelf = self;
                 [UIView
                  animateWithDuration:0.3
@@ -355,6 +386,9 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
                      }
                  }
                  completion:^(BOOL finished) {
+                     
+                     self.longPressGestureRecognizer.enabled = YES;
+                     
                      __strong typeof(self) strongSelf = weakSelf;
                      if (strongSelf) {
                          [strongSelf.currentView removeFromSuperview];
@@ -480,6 +514,7 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
             [self setupCollectionView];
         } else {
             [self invalidatesScrollTimer];
+            [self tearDownCollectionView];
         }
     }
 }
